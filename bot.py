@@ -1,7 +1,7 @@
 import logging
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, CallbackQueryHandler, filters, Dispatcher
+from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, CallbackQueryHandler, filters
 
 # Configurazioni
 BOT_TOKEN = "6988160636:AAEDg6wo4kpeHkP7JOLJ0ds7DYOznEd8b7o"
@@ -115,7 +115,7 @@ def button_callback(update: Update, context: CallbackContext):
     query.answer()
 
     if query.data == "view_users":
-        users_list = "\n".join([f"User: {data['username']} - Warns: {data['warns']}" for user_id, data in users_db.items()])
+        users_list = "\n.join([f"User: {data['username']} - Warns: {data['warns']}" for user_id, data in users_db.items()])
         query.edit_message_text(f"👥 Utenti:\n{users_list}")
 
     elif query.data == "reset_warn":
@@ -125,7 +125,7 @@ def button_callback(update: Update, context: CallbackContext):
 
 # Main
 def main():
-    updater = Updater(BOT_TOKEN, update_queue=None)
+    updater = Updater(BOT_TOKEN)
     dispatcher = updater.dispatcher
 
     # Comandi
