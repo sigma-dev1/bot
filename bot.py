@@ -115,7 +115,7 @@ def button_callback(update: Update, context: CallbackContext):
     query.answer()
 
     if query.data == "view_users":
-        users_list = "\n.join([f"User: {data['username']} - Warns: {data['warns']}" for user_id, data in users_db.items()])
+        users_list = "\n".join([f"User: {data['username']} - Warns: {data['warns']}" for user_id, data in users_db.items()])
         query.edit_message_text(f"👥 Utenti:\n{users_list}")
 
     elif query.data == "reset_warn":
