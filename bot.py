@@ -1,7 +1,7 @@
 import logging
 import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, CallbackQueryHandler, filters
 
 # Configurazioni
 BOT_TOKEN = "6988160636:AAEDg6wo4kpeHkP7JOLJ0ds7DYOznEd8b7o"
@@ -133,7 +133,7 @@ def main():
     dispatcher.add_handler(CommandHandler("settings", settings))
 
     # Messaggi
-    dispatcher.add_handler(MessageHandler(Filters.text | Filters.photo, analyze_message))
+    dispatcher.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, analyze_message))
 
     # Callback
     dispatcher.add_handler(CallbackQueryHandler(button_callback))
