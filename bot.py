@@ -1,146 +1,179 @@
+import requests
 import logging
-import re
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, CallbackQueryHandler, filters
+import socket
+from pyrogram import Client, filters
+from pyrogram.types import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
+import config
+import asyncio
 
-# Configurazioni
-BOT_TOKEN = "6988160636:AAEDg6wo4kpeHkP7JOLJ0ds7DYOznEd8b7o"
-PROHIBITED_PATTERNS = [r"\+?\d{10,}", r"(porn|gore|badword1|badword2)"]
+# Configurazione del logging
+logging.basicConfig(level=logging.INFO)
 
-# Database locale simulato
-users_db = {}
-groups_config = {}
+bot = Client(
+    "group_guardian",
+    bot_token=config.BOT_TOKEN,
+    api_id=config.API_ID,
+    api_hash=config.API_HASH
+)
 
-# Logging
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+# Memorizza chi ha aggiunto il bot e le configurazioni per ogni gruppo
+GROUP_SETTINGS = {}
+GROUP_IP_MEMORY = {}
+GROUP_UNBANNED_USERS = {}
+GROUP_TASKS = {}
+GROUP_MESSAGES = {}
+GROUP_ADMINS = {}  # Memorizza gli amministratori per ogni gruppo
+GROUP_ADDED_BY = {}  # Memorizza chi ha aggiunto il bot a ogni gruppo
+
+EUROPE_COUNTRY_CODES = ['AL', 'AD', 'AM', 'AT', 'AZ', 'BY', 'BE', 'BA', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'GE', 'DE', 'GR', 'HU', 'IS', 'IE', 'IT', 'KZ', 'XK', 'LV', 'LI', 'LT', 'LU', 'MT', 'MD', 'MC', 'ME', 'NL', 'MK', 'NO', 'PL', 'PT', 'RO', 'SM', 'RS', 'SK', 'SI', 'ES', 'SE', 'CH', 'TR', 'UA', 'GB', 'VA']
+
 
 # Funzioni di utilità
-def is_admin(update: Update, user_id: int) -> bool:
-    """Controlla se un utente è amministratore nel gruppo."""
-    admins = update.effective_chat.get_administrators()
-    return any(admin.user.id == user_id for admin in admins)
+def initialize_group(group_id):
+    """Inizializza i dati del gruppo se non esistono."""
+    if group_id not in GROUP_SETTINGS:
+        GROUP_SETTINGS[group_id] = {
+            "VERIFICATION_ENABLED": True,  # Verifica all'ingresso attiva
+        }
+        GROUP_IP_MEMORY[group_id] = {}
+        GROUP_UNBANNED_USERS[group_id] = set()
+        GROUP_TASKS[group_id] = {}
+        GROUP_MESSAGES[group_id] = []
 
-def warn_user(update: Update, context: CallbackContext, user_id: int, reason: str):
-    """Aggiungi warn all'utente e gestisci eventuali sanzioni."""
-    chat_id = update.effective_chat.id
-    username = update.message.from_user.username or "Utente sconosciuto"
+def is_duplicate_ip(group_id, ip_address):
+    return [user_id for user_id, ip in GROUP_IP_MEMORY[group_id].items() if ip == ip_address]
 
-    if user_id not in users_db:
-        users_db[user_id] = {"username": username, "warns": 0, "muted": False, "blacklisted": False}
+async def ban_user(client, chat_id, user_ids, reason):
+    for user_id in user_ids:
+        await client.ban_chat_member(chat_id, user_id)
+    unban_button = InlineKeyboardButton(text="🔓 Sblocca Utenti", callback_data=f"unban_{'_'.join(map(str, user_ids))}")
+    unban_keyboard = InlineKeyboardMarkup([[unban_button]])
+    ban_message = await client.send_message(chat_id, reason, reply_markup=unban_keyboard)
+    GROUP_MESSAGES[chat_id].append(ban_message.id)
 
-    user_data = users_db[user_id]
-    if user_data["blacklisted"]:
-        return  # Utente già blacklistato
+async def unban_users(client, chat_id, user_ids):
+    for user_id in user_ids:
+        await client.unban_chat_member(chat_id, user_id)
+        if user_id not in GROUP_UNBANNED_USERS[chat_id]:
+            await client.send_message(chat_id, f"L'utente con ID {user_id} è stato sbloccato e non dovrà ripetere la verifica.")
+        GROUP_UNBANNED_USERS[chat_id].add(user_id)
 
-    user_data["warns"] += 1
-    warns = user_data["warns"]
+# Gestione dell'entrata del bot nel gruppo
+@bot.on_chat_member_updated
+async def on_bot_added_to_group(client, message):
+    if message.new_chat_member.is_bot and message.new_chat_member.user.id == bot.me.id:
+        group_id = message.chat.id
+        user_id = message.from_user.id
 
-    if warns >= 5:
-        # Muta l'utente
-        context.bot.restrict_chat_member(chat_id, user_id, permissions=None)
-        user_data["muted"] = True
-        update.message.reply_text(f"⚠️ {username} è stato mutato per aver raggiunto 5 warn!")
-    else:
-        update.message.reply_text(f"⚠️ Warn per {username}: {warns}/5. Motivo: {reason}")
+        # Memorizza chi ha aggiunto il bot
+        GROUP_ADDED_BY[group_id] = user_id
+        GROUP_ADMINS[group_id] = {user_id}  # Solo chi ha aggiunto il bot è amministratore iniziale
+        initialize_group(group_id)
+        await client.send_message(group_id, "Il bot è stato aggiunto al gruppo. Solo l'amministratore che ha aggiunto il bot può configurarlo.")
 
-def blacklist_user(update: Update, context: CallbackContext, user_id: int):
-    """Blacklist l'utente e bannalo dal gruppo."""
-    chat_id = update.effective_chat.id
-    username = update.message.from_user.username or "Utente sconosciuto"
+# Comandi per abilitare/disabilitare la verifica
+@bot.on_message(filters.command("enable_verification") & filters.group)
+async def enable_verification(client, message):
+    group_id = message.chat.id
+    initialize_group(group_id)
 
-    users_db[user_id]["blacklisted"] = True
-    context.bot.kick_chat_member(chat_id, user_id)
-    update.message.reply_text(f"❌ {username} è stato blacklistato e bannato per contenuti vietati.")
-
-# Gestione messaggi
-def analyze_message(update: Update, context: CallbackContext):
-    """Analizza i messaggi di testo e immagini."""
-    user_id = update.message.from_user.id
-    chat_id = update.effective_chat.id
-    text = update.message.text
-    username = update.message.from_user.username or "Utente sconosciuto"
-
-    # Salta i messaggi degli admin
-    if is_admin(update, user_id):
+    if message.from_user.id not in GROUP_ADMINS[group_id]:
+        await message.reply("Non hai i permessi per eseguire questo comando.")
         return
 
-    # Controllo testo
-    if text:
-        for pattern in PROHIBITED_PATTERNS:
-            if re.search(pattern, text.lower()):
-                warn_user(update, context, user_id, "Testo inappropriato")
-                return
+    GROUP_SETTINGS[group_id]["VERIFICATION_ENABLED"] = True
+    await message.reply("La verifica all'ingresso è stata abilitata.")
 
-    # Controllo immagini
-    if update.message.photo:
-        update.message.reply_text(f"⚠️ {username}, la tua immagine è in fase di verifica.")
-        # Simulazione di analisi immagini
-        image_file_id = update.message.photo[-1].file_id
-        file = context.bot.get_file(image_file_id)
-        file.download("temp_image.jpg")
-        
-        # Esempio di logica per immagini vietate (semplificata)
-        if is_suspicious_image("temp_image.jpg"):
-            blacklist_user(update, context, user_id)
+@bot.on_message(filters.command("disable_verification") & filters.group)
+async def disable_verification(client, message):
+    group_id = message.chat.id
+    initialize_group(group_id)
 
-def is_suspicious_image(image_path):
-    """Simula il rilevamento di un'immagine sospetta."""
-    # Placeholder per analisi automatica
-    # In futuro, potresti aggiungere modelli locali di rilevamento.
-    # Ad esempio: controllare dimensioni, colore dominante o altre metriche.
-    return False  # Cambia con logica reale se necessaria
-
-# Comando /start
-def start(update: Update, context: CallbackContext):
-    """Messaggio iniziale."""
-    update.message.reply_text("🤖 Ciao! Sono il bot di moderazione. Solo gli amministratori possono configurarmi.")
-
-# Pannello impostazioni
-def settings(update: Update, context: CallbackContext):
-    """Pannello di controllo per gli amministratori."""
-    if not is_admin(update, update.message.from_user.id):
-        update.message.reply_text("⚠️ Solo gli amministratori possono accedere al pannello di controllo.")
+    if message.from_user.id not in GROUP_ADMINS[group_id]:
+        await message.reply("Non hai i permessi per eseguire questo comando.")
         return
 
-    keyboard = [
-        [InlineKeyboardButton("Visualizza Warn/Blacklist", callback_data="view_users")],
-        [InlineKeyboardButton("Reset Warn", callback_data="reset_warn")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("⚙️ Pannello di controllo:", reply_markup=reply_markup)
+    GROUP_SETTINGS[group_id]["VERIFICATION_ENABLED"] = False
+    await message.reply("La verifica all'ingresso è stata disabilitata.")
 
-def button_callback(update: Update, context: CallbackContext):
-    """Gestisce i bottoni del pannello."""
-    query = update.callback_query
-    query.answer()
+# Aggiungi un nuovo amministratore
+@bot.on_message(filters.command("add_admin") & filters.group)
+async def add_admin(client, message):
+    group_id = message.chat.id
+    initialize_group(group_id)
 
-    if query.data == "view_users":
-        users_list = "\n".join([f"User: {data['username']} - Warns: {data['warns']}" for user_id, data in users_db.items()])
-        query.edit_message_text(f"👥 Utenti:\n{users_list}")
+    if message.from_user.id != GROUP_ADDED_BY[group_id]:
+        await message.reply("Solo l'amministratore che ha aggiunto il bot può eseguire questo comando.")
+        return
 
-    elif query.data == "reset_warn":
-        for user in users_db.values():
-            user["warns"] = 0
-        query.edit_message_text("✅ Warn resettati per tutti gli utenti!")
+    if not message.reply_to_message:
+        await message.reply("Rispondi a un messaggio dell'utente da autorizzare.")
+        return
 
-# Main
-def main():
-    updater = Updater(BOT_TOKEN)
-    dispatcher = updater.dispatcher
+    user_id = message.reply_to_message.from_user.id
+    GROUP_ADMINS[group_id].add(user_id)
+    await message.reply(f"L'utente con ID {user_id} è stato aggiunto come amministratore.")
 
-    # Comandi
-    dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(CommandHandler("settings", settings))
+# Rimuovi un amministratore
+@bot.on_message(filters.command("remove_admin") & filters.group)
+async def remove_admin(client, message):
+    group_id = message.chat.id
+    initialize_group(group_id)
 
-    # Messaggi
-    dispatcher.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, analyze_message))
+    if message.from_user.id != GROUP_ADDED_BY[group_id]:
+        await message.reply("Solo l'amministratore che ha aggiunto il bot può eseguire questo comando.")
+        return
 
-    # Callback
-    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+    if not message.reply_to_message:
+        await message.reply("Rispondi a un messaggio dell'utente da rimuovere come amministratore.")
+        return
 
-    # Avvia il bot
-    updater.start_polling()
-    updater.idle()
+    user_id = message.reply_to_message.from_user.id
+    if user_id == GROUP_ADDED_BY[group_id]:
+        await message.reply("Non puoi rimuovere chi ha aggiunto il bot.")
+        return
 
-if __name__ == "__main__":
-    main()
+    GROUP_ADMINS[group_id].discard(user_id)
+    await message.reply(f"L'utente con ID {user_id} è stato rimosso come amministratore.")
+
+# Gestione dei nuovi membri
+@bot.on_message(filters.new_chat_members)
+async def welcome_and_mute(client, message):
+    group_id = message.chat.id
+    initialize_group(group_id)
+
+    if not GROUP_SETTINGS[group_id]["VERIFICATION_ENABLED"]:
+        return  # Verifica disabilitata
+
+    for new_member in message.new_chat_members:
+        if new_member.id in GROUP_UNBANNED_USERS[group_id]:
+            continue
+
+        logging.info("Nuovo membro: %s", new_member.id)
+        await client.restrict_chat_member(
+            group_id,
+            new_member.id,
+            ChatPermissions(can_send_messages=False)
+        )
+
+        verification_link = f"https://t.me/{client.me.username}?start=verifica_{new_member.id}"
+        button = InlineKeyboardButton(text="✅ Verifica", url=verification_link)
+        keyboard = InlineKeyboardMarkup([[button]])
+        welcome_message = await message.reply_text(
+            f"Benvenuto {new_member.first_name or new_member.username}! Completa la verifica cliccando il bottone qui sotto.",
+            reply_markup=keyboard
+        )
+        GROUP_MESSAGES[group_id].append(welcome_message.id)
+
+        task = asyncio.create_task(timer(client, group_id, new_member.id, welcome_message.id))
+        GROUP_TASKS[group_id][new_member.id] = task
+
+async def timer(client, group_id, user_id, message_id):
+    await asyncio.sleep(180)
+    if user_id not in GROUP_IP_MEMORY[group_id] and user_id not in GROUP_UNBANNED_USERS[group_id]:
+        await ban_user(client, group_id, [user_id], f"L'utente {user_id} non ha passato la verifica ed è stato bannato.")
+        await client.delete_messages(group_id, [message_id])
+        GROUP_MESSAGES[group_id].remove(message_id)
+
+# Avvia il bot
+bot.run()
